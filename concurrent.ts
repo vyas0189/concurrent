@@ -1,48 +1,26 @@
+import express, { Request, Response } from 'express';
 import axios, { AxiosInstance } from 'axios';
-import axiosExtensions from 'axios-extensions';
-import { Response } from 'express';
-import Mutex from 'async-mutex/lib/Mutex';
+import Bottleneck from 'bottleneck';
+import { Mutex } from 'async-mutex';
 
-interface TestData {
-  [key: string]: any;
-}
-
-interface SSEData {
-  outcome: string;
-}
-
-const http: AxiosInstance = axios.create({
-  baseURL: 'http://api.example.com',
-  adapter: axiosExtensions.httpAdapter,
-  maxRedirects: 0,
-  pool: {
-    maxSockets: 50,
-    maxFreeSockets: 10,
-    timeout: 60000,
-    ttl: 60000,
-  },
-});
-
-// Create a mutex to ensure thread safety
-const mutex = new Mutex();
-
-const batchedRequests = async (requests: (() => Promise<any>)[], batchSize: number = 10) => {
-  const results = [];
-
-  for (let i = 0; i < requests.length; i += batchSize) {
-    const batch = requests.slice(i, i + batchSize);
-    const promises = batch.map((request) => request());
-    const batchResults = await Promise.allSettled(promises);
-    results.push(...batchResults);
-  }
-
-  return results;
+type TestData = {
+  id: number;
+  data: string;
 };
+
+type SSEData = {
+  outcome: 'success' | 'failure';
+};
+
+const app = express();
+const http: AxiosInstance = axios.create({ baseURL: 'http://localhost:3000' });
+const limiter = new Bottleneck({ maxConcurrent: 1, minTime: 1000 });
+const mutex = new Mutex();
 
 const postTestDataToApi = async (testData: TestData[], res: Response) => {
   // Acquire the mutex before executing the critical section
   const release = await mutex.acquire();
-  
+
   try {
     res.writeHead(200, {
       'Content-Type': 'text/event-stream',
@@ -54,46 +32,47 @@ const postTestDataToApi = async (testData: TestData[], res: Response) => {
       res.write(`data: ${JSON.stringify(data)}\n\n`);
     };
 
-    let outcome = 'RUNNING';
-    let retries = 0;
-
-    while (outcome === 'RUNNING') {
+    const retryRequest = async (data: TestData, retries = 0) => {
       try {
-        const requests = [];
+        const response = await http.post('/api', data);
+        const outcome = response.data.outcome;
 
-        for (const data of testData) {
-          requests.push(() => http.post('/api', data));
-        }
-
-        const results = await batchedRequests(requests);
-
-        for (const result of results) {
-          if (result.status === 'rejected') {
-            throw result.reason;
+        if (outcome === 'success' || outcome === 'failure') {
+          sendSSE({ outcome });
+        } else if (outcome === 'RUNNING') {
+          if (retries < 5) {
+            console.log(`Request ${data.id} is still RUNNING, retrying in ${Math.pow(2, retries) * 1000} ms`);
+            setTimeout(() => retryRequest(data, retries + 1), Math.pow(2, retries) * 1000);
+          } else {
+            console.log(`Request ${data.id} is still RUNNING after maximum retries reached, aborting`);
           }
-
-          outcome = result.value.data.outcome;
-
-          if (outcome === 'success' || outcome === 'failure') {
-            sendSSE({ outcome });
-          }
+        } else {
+          console.log(`Request ${data.id} failed with outcome ${outcome}`);
         }
       } catch (error) {
         console.error(error);
 
-        if (retries >= 5) {
-          // Maximum retries reached, aborting
-          break;
+        if (retries < 5) {
+          console.log(`Request ${data.id} failed, retrying in ${Math.pow(2, retries) * 1000} ms`);
+          setTimeout(() => retryRequest(data, retries + 1), Math.pow(2, retries) * 1000);
+        } else {
+          console.log(`Request ${data.id} failed after maximum retries reached, aborting`);
         }
-
-        // Calculate the exponential backoff delay
-        const delay = Math.pow(2, retries) * 1000;
-        retries++;
-
-        console.log(`Retrying in ${delay} ms`);
-        await new Promise((resolve) => setTimeout(resolve, delay));
       }
-    }
+    };
+
+    const batches = limiter.schedule(() => {
+      const chunkSize = 10;
+      const chunks = [];
+
+      for (let i = 0; i < testData.length; i += chunkSize) {
+        chunks.push(testData.slice(i, i + chunkSize));
+      }
+
+      return chunks.map((chunk) => Promise.all(chunk.map((data) => retryRequest(data))));
+    });
+
+    await Promise.all(batches);
 
     res.end();
   } finally {
@@ -101,3 +80,19 @@ const postTestDataToApi = async (testData: TestData[], res: Response) => {
     release();
   }
 };
+
+app.use(express.json());
+
+app.post('/batch', async (req: Request, res: Response) => {
+  const testData: TestData[] = req.body;
+
+  try {
+    await postTestDataToApi(testData, res);
+  } catch (error) {
+    console.error(error);
+    res.status(500).send('Internal server error');
+  }
+});
+
+app.listen(3000, () => {
+  console.log('Server is running on port 3000
