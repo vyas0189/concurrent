@@ -26,6 +26,19 @@ const http: AxiosInstance = axios.create({
 // Create a mutex to ensure thread safety
 const mutex = new Mutex();
 
+const batchedRequests = async (requests: (() => Promise<any>)[], batchSize: number = 10) => {
+  const results = [];
+
+  for (let i = 0; i < requests.length; i += batchSize) {
+    const batch = requests.slice(i, i + batchSize);
+    const promises = batch.map((request) => request());
+    const batchResults = await Promise.allSettled(promises);
+    results.push(...batchResults);
+  }
+
+  return results;
+};
+
 const postTestDataToApi = async (testData: TestData[], res: Response) => {
   // Acquire the mutex before executing the critical section
   const release = await mutex.acquire();
@@ -46,11 +59,20 @@ const postTestDataToApi = async (testData: TestData[], res: Response) => {
 
     while (outcome === 'RUNNING') {
       try {
-        const promises = testData.map((data) => http.post('/api', data));
-        const responses = await Promise.all(promises);
+        const requests = [];
 
-        for (const response of responses) {
-          outcome = response.data.outcome;
+        for (const data of testData) {
+          requests.push(() => http.post('/api', data));
+        }
+
+        const results = await batchedRequests(requests);
+
+        for (const result of results) {
+          if (result.status === 'rejected') {
+            throw result.reason;
+          }
+
+          outcome = result.value.data.outcome;
 
           if (outcome === 'success' || outcome === 'failure') {
             sendSSE({ outcome });
