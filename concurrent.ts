@@ -1,9 +1,6 @@
-import axios, { AxiosResponse } from "axios";
+import axios, { AxiosInstance, AxiosResponse } from "axios";
 import express, { Response } from "express";
-import { Pool } from "pg";
-import { v4 as uuidv4 } from "uuid";
 
-const pool = new Pool();
 
 interface TestData {
   id: string;
@@ -19,15 +16,21 @@ const API_URL = "https://example.com/api";
 const RETRY_DELAY = 1000;
 const MAX_RETRIES = 10;
 
+// Create an instance of axios with the common options
+const axiosInstance: AxiosInstance = axios.create({
+  baseURL: API_URL,
+  timeout: 5000 // set a timeout of 5 seconds for API calls
+});
+
 async function postData(testData: TestData): Promise<Outcome> {
-  const url = `${API_URL}/data`;
-  const response = await axios.post(url, testData);
+  const url = "/data";
+  const response = await axiosInstance.post(url, testData);
   return response.data;
 }
 
 async function getOutcome(id: string): Promise<Outcome> {
-  const url = `${API_URL}/outcome/${id}`;
-  const response = await axios.get(url);
+  const url = `/outcome/${id}`;
+  const response = await axiosInstance.get(url);
   return response.data;
 }
 
@@ -46,24 +49,34 @@ async function pollOutcome(id: string): Promise<Outcome> {
 }
 
 async function processTestData(testData: TestData, res: Response) {
-  const outcome = await postData(testData);
-  const polledOutcome = await pollOutcome(outcome.id);
+  try {
+    const outcome = await postData(testData);
+    const polledOutcome = await pollOutcome(outcome.id);
 
-  res.write(`id: ${outcome.id}\n`);
-  res.write(`data: ${JSON.stringify(polledOutcome)}\n\n`);
-
-  res.flush();
+    res.write(`id: ${outcome.id}\n`);
+    res.write(`data: ${JSON.stringify(polledOutcome)}\n\n`);
+  } catch (error) {
+    console.error(error);
+    res.write(`error: ${error.message}\n\n`);
+  }
 }
 
 async function processTestDataSet(testData: TestData[], res: Response) {
-  try {
-    const promises = testData.map((testData) => processTestData(testData, res));
+  const batchSize = 10; // set the batch size to 10
+  let batchStart = 0;
+
+  while (batchStart < testData.length) {
+    const batchEnd = Math.min(batchStart + batchSize, testData.length);
+    const batchData = testData.slice(batchStart, batchEnd);
+    const promises = batchData.map((testData) => processTestData(testData, res));
+
+    // Use Promise.all() to send multiple requests at once
     await Promise.all(promises);
-  } catch (error) {
-    console.error(error);
-  } finally {
-    res.end();
+
+    batchStart += batchSize;
   }
+
+  res.end();
 }
 
 async function handleTestRequest(req: express.Request, res: Response) {
