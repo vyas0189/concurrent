@@ -1,98 +1,89 @@
-import express, { Request, Response } from 'express';
-import axios, { AxiosInstance } from 'axios';
-import Bottleneck from 'bottleneck';
-import { Mutex } from 'async-mutex';
+import axios, { AxiosResponse } from "axios";
+import express, { Response } from "express";
+import { Pool } from "pg";
+import { v4 as uuidv4 } from "uuid";
 
-type TestData = {
-  id: number;
+const pool = new Pool();
+
+interface TestData {
+  id: string;
   data: string;
-};
+}
 
-type SSEData = {
-  outcome: 'success' | 'failure';
-};
+interface Outcome {
+  id: string;
+  outcome: string;
+}
 
-const app = express();
-const http: AxiosInstance = axios.create({ baseURL: 'http://localhost:3000' });
-const limiter = new Bottleneck({ maxConcurrent: 1, minTime: 1000 });
-const mutex = new Mutex();
+const API_URL = "https://example.com/api";
+const RETRY_DELAY = 1000;
+const MAX_RETRIES = 10;
 
-const postTestDataToApi = async (testData: TestData[], res: Response) => {
-  // Acquire the mutex before executing the critical section
-  const release = await mutex.acquire();
+async function postData(testData: TestData): Promise<Outcome> {
+  const url = `${API_URL}/data`;
+  const response = await axios.post(url, testData);
+  return response.data;
+}
+
+async function getOutcome(id: string): Promise<Outcome> {
+  const url = `${API_URL}/outcome/${id}`;
+  const response = await axios.get(url);
+  return response.data;
+}
+
+async function pollOutcome(id: string): Promise<Outcome> {
+  let retries = 0;
+  let outcome = await getOutcome(id);
+
+  while (outcome.outcome === "RUNNING" && retries < MAX_RETRIES) {
+    const backoffDelay = RETRY_DELAY * 2 ** retries;
+    await new Promise((resolve) => setTimeout(resolve, backoffDelay));
+    outcome = await getOutcome(id);
+    retries++;
+  }
+
+  return outcome;
+}
+
+async function processTestData(testData: TestData, res: Response) {
+  const outcome = await postData(testData);
+  const polledOutcome = await pollOutcome(outcome.id);
+
+  res.write(`id: ${outcome.id}\n`);
+  res.write(`data: ${JSON.stringify(polledOutcome)}\n\n`);
+
+  res.flush();
+}
+
+async function processTestDataSet(testData: TestData[], res: Response) {
+  try {
+    const promises = testData.map((testData) => processTestData(testData, res));
+    await Promise.all(promises);
+  } catch (error) {
+    console.error(error);
+  } finally {
+    res.end();
+  }
+}
+
+async function handleTestRequest(req: express.Request, res: Response) {
+  const testData: TestData[] = req.body;
+  res.setHeader("Content-Type", "text/event-stream");
 
   try {
-    res.writeHead(200, {
-      'Content-Type': 'text/event-stream',
-      'Cache-Control': 'no-cache',
-      'Connection': 'keep-alive',
-    });
-
-    const sendSSE = (data: SSEData) => {
-      res.write(`data: ${JSON.stringify(data)}\n\n`);
-    };
-
-    const retryRequest = async (data: TestData, retries = 0) => {
-      try {
-        const response = await http.post('/api', data);
-        const outcome = response.data.outcome;
-
-        if (outcome === 'success' || outcome === 'failure') {
-          sendSSE({ outcome });
-        } else if (outcome === 'RUNNING') {
-          if (retries < 5) {
-            console.log(`Request ${data.id} is still RUNNING, retrying in ${Math.pow(2, retries) * 1000} ms`);
-            setTimeout(() => retryRequest(data, retries + 1), Math.pow(2, retries) * 1000);
-          } else {
-            console.log(`Request ${data.id} is still RUNNING after maximum retries reached, aborting`);
-          }
-        } else {
-          console.log(`Request ${data.id} failed with outcome ${outcome}`);
-        }
-      } catch (error) {
-        console.error(error);
-
-        if (retries < 5) {
-          console.log(`Request ${data.id} failed, retrying in ${Math.pow(2, retries) * 1000} ms`);
-          setTimeout(() => retryRequest(data, retries + 1), Math.pow(2, retries) * 1000);
-        } else {
-          console.log(`Request ${data.id} failed after maximum retries reached, aborting`);
-        }
-      }
-    };
-
-    const batches = limiter.schedule(() => {
-      const chunkSize = 10;
-      const chunks = [];
-
-      for (let i = 0; i < testData.length; i += chunkSize) {
-        chunks.push(testData.slice(i, i + chunkSize));
-      }
-
-      return chunks.map((chunk) => Promise.all(chunk.map((data) => retryRequest(data))));
-    });
-
-    await Promise.all(batches);
-
-    res.end();
-  } finally {
-    // Release the mutex after the critical section is done
-    release();
+    await processTestDataSet(testData, res);
+  } catch (error) {
+    console.error(error);
+    res.status(500).send("Internal server error");
   }
-};
+}
+
+const app = express();
 
 app.use(express.json());
 
-app.post('/batch', async (req: Request, res: Response) => {
-  const testData: TestData[] = req.body;
-
-  try {
-    await postTestDataToApi(testData, res);
-  } catch (error) {
-    console.error(error);
-    res.status(500).send('Internal server error');
-  }
-});
+app.post("/test", handleTestRequest);
 
 app.listen(3000, () => {
-  console.log('Server is running on port 3000
+  console.log("Server is running on port 3000");
+});
