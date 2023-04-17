@@ -1,7 +1,6 @@
 import axios, { AxiosInstance, AxiosResponse } from "axios";
 import express, { Response } from "express";
 
-
 interface TestData {
   id: string;
   data: string;
@@ -48,35 +47,15 @@ async function pollOutcome(id: string): Promise<Outcome> {
   return outcome;
 }
 
-async function processTestData(testData: TestData, res: Response) {
+async function processTestData(testData: TestData): Promise<Outcome> {
   try {
     const outcome = await postData(testData);
     const polledOutcome = await pollOutcome(outcome.id);
-
-    res.write(`id: ${outcome.id}\n`);
-    res.write(`data: ${JSON.stringify(polledOutcome)}\n\n`);
+    return polledOutcome;
   } catch (error) {
     console.error(error);
-    res.write(`error: ${error.message}\n\n`);
+    throw error;
   }
-}
-
-async function processTestDataSet(testData: TestData[], res: Response) {
-  const batchSize = 10; // set the batch size to 10
-  let batchStart = 0;
-
-  while (batchStart < testData.length) {
-    const batchEnd = Math.min(batchStart + batchSize, testData.length);
-    const batchData = testData.slice(batchStart, batchEnd);
-    const promises = batchData.map((testData) => processTestData(testData, res));
-
-    // Use Promise.all() to send multiple requests at once
-    await Promise.all(promises);
-
-    batchStart += batchSize;
-  }
-
-  res.end();
 }
 
 async function handleTestRequest(req: express.Request, res: Response) {
@@ -84,7 +63,14 @@ async function handleTestRequest(req: express.Request, res: Response) {
   res.setHeader("Content-Type", "text/event-stream");
 
   try {
-    await processTestDataSet(testData, res);
+    for (let i = 0; i < testData.length; i++) {
+      const outcome = await processTestData(testData[i]);
+      const event = outcome.outcome === "SUCCESS" ? "success" : "failure";
+      const data = JSON.stringify(outcome);
+      res.write(`event: ${event}\n`);
+      res.write(`data: ${data}\n\n`);
+    }
+    res.end();
   } catch (error) {
     console.error(error);
     res.status(500).send("Internal server error");
