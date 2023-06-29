@@ -1,88 +1,141 @@
-import axios, { AxiosInstance, AxiosResponse } from "axios";
-import express, { Response } from "express";
+import React from 'react';
+import { useTable, useBlockLayout } from 'react-table';
+import { FixedSizeList } from 'react-window';
+import AutoSizer from 'react-virtualized-auto-sizer';
+import useSWRInfinite from 'swr/infinite';
+import axios from 'axios';
+import { Table } from 'react-bootstrap';
 
-interface TestData {
-  id: string;
-  data: string;
+interface Row {
+  id: number;
+  name: string;
+  age: number;
+  // ... Add other properties as needed
 }
 
-interface Outcome {
-  id: string;
-  outcome: string;
+interface LargeTableProps {
+  fetchData: (page: number) => Promise<Row[]>;
 }
 
-const API_URL = "https://example.com/api";
-const RETRY_DELAY = 1000;
-const MAX_RETRIES = 10;
+const PAGE_SIZE = 50; // Number of rows to fetch per page
 
-// Create an instance of axios with the common options
-const axiosInstance: AxiosInstance = axios.create({
-  baseURL: API_URL,
-  timeout: 5000 // set a timeout of 5 seconds for API calls
-});
+const LargeTable: React.FC<LargeTableProps> = ({ fetchData }) => {
+  const getKey = (pageIndex: number, previousPageData: Row[] | null) => {
+    if (previousPageData && !previousPageData.length) return null; // End of data
+    return `tableData-${pageIndex}`;
+  };
 
-async function postData(testData: TestData): Promise<Outcome> {
-  const url = "/data";
-  const response = await axiosInstance.post(url, testData);
-  return response.data;
-}
+  const { data: paginatedRows, error, size, setSize } = useSWRInfinite<Row[]>(getKey, fetchData);
 
-async function getOutcome(id: string): Promise<Outcome> {
-  const url = `/outcome/${id}`;
-  const response = await axiosInstance.get(url);
-  return response.data;
-}
+  const rows = paginatedRows ? paginatedRows.flatMap(row => row) : [];
 
-async function pollOutcome(id: string): Promise<Outcome> {
-  let retries = 0;
-  let outcome = await getOutcome(id);
+  const columns = React.useMemo(
+    () => [
+      { Header: 'Name', accessor: 'name' },
+      { Header: 'Age', accessor: 'age' },
+      // ... Add other columns as needed
+    ],
+    []
+  );
 
-  while (outcome.outcome === "RUNNING" && retries < MAX_RETRIES) {
-    const backoffDelay = RETRY_DELAY * 2 ** retries;
-    await new Promise((resolve) => setTimeout(resolve, backoffDelay));
-    outcome = await getOutcome(id);
-    retries++;
+  const tableInstance = useTable(
+    {
+      columns,
+      data: rows,
+      initialState: {
+        pageIndex: 0,
+        pageSize: PAGE_SIZE,
+      },
+    },
+    useBlockLayout
+  );
+
+  const { getTableProps, getTableBodyProps, headerGroups, rows: tableRows, prepareRow } = tableInstance;
+
+  const RenderRow: React.FC<{ index: number; style: React.CSSProperties }> = React.useCallback(
+    ({ index, style }) => {
+      const row = tableRows[index];
+      prepareRow(row);
+      return (
+        <tr {...row.getRowProps()} style={style}>
+          {row.cells.map(cell => (
+            <td {...cell.getCellProps()}>{cell.render('Cell')}</td>
+          ))}
+        </tr>
+      );
+    },
+    [prepareRow, tableRows]
+  );
+
+  if (error) {
+    return <div>Error loading table data.</div>;
   }
 
-  return outcome;
-}
+  const loadMore = () => {
+    setSize(size + 1);
+  };
 
-async function processTestData(testData: TestData): Promise<Outcome> {
-  try {
-    const outcome = await postData(testData);
-    const polledOutcome = await pollOutcome(outcome.id);
-    return polledOutcome;
-  } catch (error) {
-    console.error(error);
-    throw error;
-  }
-}
+  return (
+    <Table {...getTableProps()} striped bordered hover>
+      <thead>
+        {headerGroups.map(headerGroup => (
+          <tr {...headerGroup.getHeaderGroupProps()}>
+            {headerGroup.headers.map(column => (
+              <th {...column.getHeaderProps()}>{column.render('Header')}</th>
+            ))}
+          </tr>
+        ))}
+      </thead>
+      <tbody {...getTableBodyProps()}>
+        <AutoSizer>
+          {({ height, width }) => (
+            <InfiniteLoader
+              isItemLoaded={index => index < rows.length}
+              itemCount={rows.length + 1} // Add an extra row for loading indicator
+              loadMoreItems={loadMore}
+            >
+              {({ onItemsRendered, ref }) => (
+                <FixedSizeList
+                  height={height}
+                  width={width}
+                  itemSize={35}
+                  itemCount={rows.length}
+                  overscanCount={10}
+                  onItemsRendered={onItemsRendered}
+                  ref={ref}
+                >
+                  {RenderRow}
+                </FixedSizeList>
+              )}
+            </InfiniteLoader>
+          )}
+        </AutoSizer>
+      </tbody>
+    </Table>
+  );
+};
 
-async function handleTestRequest(req: express.Request, res: Response) {
-  const testData: TestData[] = req.body;
-  res.setHeader("Content-Type", "text/event-stream");
+const App: React.FC = () => {
+  const fetchData = async (page: number): Promise<Row[]> => {
+    try {
+      const response = await axios.post('https://api.example.com/table-data', {
+        page,
+        pageSize: PAGE_SIZE,
+        // Add other request body parameters as needed
+      });
 
-  try {
-    for (let i = 0; i < testData.length; i++) {
-      const outcome = await processTestData(testData[i]);
-      const event = outcome.outcome === "SUCCESS" ? "success" : "failure";
-      const data = JSON.stringify(outcome);
-      res.write(`event: ${event}\n`);
-      res.write(`data: ${data}\n\n`);
+      return response.data;
+    } catch (error) {
+      throw new Error('Error fetching table data.');
     }
-    res.end();
-  } catch (error) {
-    console.error(error);
-    res.status(500).send("Internal server error");
-  }
-}
+  };
 
-const app = express();
+  return (
+    <div>
+      <LargeTable fetchData={fetchData} />
+    </div>
+  );
+};
 
-app.use(express.json());
-
-app.post("/test", handleTestRequest);
-
-app.listen(3000, () => {
-  console.log("Server is running on port 3000");
-});
+export default App;
+                            
