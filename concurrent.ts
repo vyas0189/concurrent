@@ -1,141 +1,69 @@
 import React from 'react';
-import { useTable, useBlockLayout } from 'react-table';
-import { FixedSizeList } from 'react-window';
-import AutoSizer from 'react-virtualized-auto-sizer';
-import useSWRInfinite from 'swr/infinite';
-import axios from 'axios';
-import { Table } from 'react-bootstrap';
+import { useTable } from 'react-table';
+import { Table, Column, AutoSizer } from 'react-virtualized';
 
-interface Row {
-  id: number;
-  name: string;
-  age: number;
-  // ... Add other properties as needed
-}
-
-interface LargeTableProps {
-  fetchData: (page: number) => Promise<Row[]>;
-}
-
-const PAGE_SIZE = 50; // Number of rows to fetch per page
-
-const LargeTable: React.FC<LargeTableProps> = ({ fetchData }) => {
-  const getKey = (pageIndex: number, previousPageData: Row[] | null) => {
-    if (previousPageData && !previousPageData.length) return null; // End of data
-    return `tableData-${pageIndex}`;
-  };
-
-  const { data: paginatedRows, error, size, setSize } = useSWRInfinite<Row[]>(getKey, fetchData);
-
-  const rows = paginatedRows ? paginatedRows.flatMap(row => row) : [];
-
+const VirtualizedTable = ({ data }) => {
   const columns = React.useMemo(
     () => [
-      { Header: 'Name', accessor: 'name' },
-      { Header: 'Age', accessor: 'age' },
-      // ... Add other columns as needed
+      // Define your columns here
+      // Example:
+      {
+        Header: 'Name',
+        accessor: 'name',
+      },
+      {
+        Header: 'Age',
+        accessor: 'age',
+      },
+      // Add more columns as needed
     ],
     []
   );
 
-  const tableInstance = useTable(
-    {
-      columns,
-      data: rows,
-      initialState: {
-        pageIndex: 0,
-        pageSize: PAGE_SIZE,
-      },
-    },
-    useBlockLayout
-  );
+  const tableInstance = useTable({
+    columns,
+    data,
+  });
 
-  const { getTableProps, getTableBodyProps, headerGroups, rows: tableRows, prepareRow } = tableInstance;
+  const { getTableProps, getTableBodyProps, headerGroups, rows, prepareRow } =
+    tableInstance;
 
-  const RenderRow: React.FC<{ index: number; style: React.CSSProperties }> = React.useCallback(
-    ({ index, style }) => {
-      const row = tableRows[index];
-      prepareRow(row);
-      return (
-        <tr {...row.getRowProps()} style={style}>
-          {row.cells.map(cell => (
-            <td {...cell.getCellProps()}>{cell.render('Cell')}</td>
+  return (
+    <AutoSizer>
+      {({ width, height }) => (
+        <Table
+          {...getTableProps()}
+          width={width}
+          height={height}
+          headerHeight={30}
+          rowHeight={30}
+          rowCount={rows.length}
+          rowGetter={({ index }) => rows[index]}
+          rowRenderer={({ index, key, style }) => {
+            const row = rows[index];
+            prepareRow(row);
+
+            return (
+              <div key={key} style={style}>
+                {row.cells.map((cell) => (
+                  <div {...cell.getCellProps()}>{cell.render('Cell')}</div>
+                ))}
+              </div>
+            );
+          }}
+        >
+          {headerGroups.map((headerGroup) => (
+            <Column
+              key={headerGroup.id}
+              header={headerGroup.headers[0].render('Header')}
+              dataKey={headerGroup.headers[0].id}
+              width={150}
+            />
           ))}
-        </tr>
-      );
-    },
-    [prepareRow, tableRows]
-  );
-
-  if (error) {
-    return <div>Error loading table data.</div>;
-  }
-
-  const loadMore = () => {
-    setSize(size + 1);
-  };
-
-  return (
-    <Table {...getTableProps()} striped bordered hover>
-      <thead>
-        {headerGroups.map(headerGroup => (
-          <tr {...headerGroup.getHeaderGroupProps()}>
-            {headerGroup.headers.map(column => (
-              <th {...column.getHeaderProps()}>{column.render('Header')}</th>
-            ))}
-          </tr>
-        ))}
-      </thead>
-      <tbody {...getTableBodyProps()}>
-        <AutoSizer>
-          {({ height, width }) => (
-            <InfiniteLoader
-              isItemLoaded={index => index < rows.length}
-              itemCount={rows.length + 1} // Add an extra row for loading indicator
-              loadMoreItems={loadMore}
-            >
-              {({ onItemsRendered, ref }) => (
-                <FixedSizeList
-                  height={height}
-                  width={width}
-                  itemSize={35}
-                  itemCount={rows.length}
-                  overscanCount={10}
-                  onItemsRendered={onItemsRendered}
-                  ref={ref}
-                >
-                  {RenderRow}
-                </FixedSizeList>
-              )}
-            </InfiniteLoader>
-          )}
-        </AutoSizer>
-      </tbody>
-    </Table>
+        </Table>
+      )}
+    </AutoSizer>
   );
 };
 
-const App: React.FC = () => {
-  const fetchData = async (page: number): Promise<Row[]> => {
-    try {
-      const response = await axios.post('https://api.example.com/table-data', {
-        page,
-        pageSize: PAGE_SIZE,
-        // Add other request body parameters as needed
-      });
-
-      return response.data;
-    } catch (error) {
-      throw new Error('Error fetching table data.');
-    }
-  };
-
-  return (
-    <div>
-      <LargeTable fetchData={fetchData} />
-    </div>
-  );
-};
-
-export default App;
-                            
+export default VirtualizedTable;
