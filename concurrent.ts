@@ -1,6 +1,7 @@
 import React from 'react';
 import { useTable } from 'react-table';
 import { Table, Column, AutoSizer } from 'react-virtualized';
+import { Table as BootstrapTable } from 'react-bootstrap';
 
 const VirtualizedTable = ({ data }) => {
   const columns = React.useMemo(
@@ -31,36 +32,29 @@ const VirtualizedTable = ({ data }) => {
   return (
     <AutoSizer>
       {({ width, height }) => (
-        <Table
-          {...getTableProps()}
-          width={width}
-          height={height}
-          headerHeight={30}
-          rowHeight={30}
-          rowCount={rows.length}
-          rowGetter={({ index }) => rows[index]}
-          rowRenderer={({ index, key, style }) => {
-            const row = rows[index];
-            prepareRow(row);
-
-            return (
-              <div key={key} style={style}>
-                {row.cells.map((cell) => (
-                  <div {...cell.getCellProps()}>{cell.render('Cell')}</div>
+        <BootstrapTable responsive striped bordered hover {...getTableProps()}>
+          <thead>
+            {headerGroups.map((headerGroup) => (
+              <tr {...headerGroup.getHeaderGroupProps()}>
+                {headerGroup.headers.map((column) => (
+                  <th {...column.getHeaderProps()}>{column.render('Header')}</th>
                 ))}
-              </div>
-            );
-          }}
-        >
-          {headerGroups.map((headerGroup) => (
-            <Column
-              key={headerGroup.id}
-              header={headerGroup.headers[0].render('Header')}
-              dataKey={headerGroup.headers[0].id}
-              width={150}
-            />
-          ))}
-        </Table>
+              </tr>
+            ))}
+          </thead>
+          <tbody {...getTableBodyProps()}>
+            {rows.map((row) => {
+              prepareRow(row);
+              return (
+                <tr {...row.getRowProps()}>
+                  {row.cells.map((cell) => (
+                    <td {...cell.getCellProps()}>{cell.render('Cell')}</td>
+                  ))}
+                </tr>
+              );
+            })}
+          </tbody>
+        </BootstrapTable>
       )}
     </AutoSizer>
   );
